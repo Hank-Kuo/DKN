@@ -1,37 +1,58 @@
-import torch
-import model.data_loader as data_loader
+import re
+import string
 
-def evaluate(data, device, model, word2idx, entity2idx):
-    answers = []
-    data_gen = data_loader.data_generator(data=data, word2ix=word2idx, entity2idx=entity2idx)
-    total_correct = 0
-    error_count = 0
-    for i in range(len(data)):
-        try:
-            d = next(data_gen)
-            head = d[0].to(device)
-            question = d[1].to(device)
-            ans = d[2]
-            ques_len = d[3].unsqueeze(0)
-            tail_test = torch.tensor(ans, dtype=torch.long).to(device)
-            top_2 = model.get_score_ranked(head=head, sentence=question, sent_len=ques_len)
-            top_2_idx = top_2[1].tolist()[0]
-            head_idx = head.tolist()
-            if top_2_idx[0] == head_idx:
-                pred_ans = top_2_idx[1]
-            else:
-                pred_ans = top_2_idx[0]
-            if type(ans) is int:
-                ans = [ans]
-            is_correct = 0
-            if pred_ans in ans:
-                total_correct += 1
-                is_correct = 1
-            q_text = d[-1]
-            answers.append(q_text + '\t' + str(pred_ans) + '\t' + str(is_correct))
-        except:
-            error_count += 1
-            
-    print(error_count)
-    accuracy = total_correct/len(data)
-    return answers, accuracy
+import numpy as np
+import torch
+from sklearn.metrics import roc_auc_score
+
+def dcg_score(y_true, y_score, k=10):
+    order = np.argsort(y_score)[::-1]
+    y_true = np.take(y_true, order[:k])
+    gains = 2**y_true - 1
+    discounts = np.log2(np.arange(len(y_true)) + 2)
+    return np.sum(gains / discounts)
+
+def ndcg_score(y_true, y_score, k=10):
+    best = dcg_score(y_true, y_true, k)
+    actual = dcg_score(y_true, y_score, k)
+    return actual / best
+
+def mrr_score(y_true, y_score):
+    order = np.argsort(y_score)[::-1]
+    y_true = np.take(y_true, order)
+    rr_score = y_true / (np.arange(len(y_true)) + 1)
+    return np.sum(rr_score) / np.sum(y_true)
+
+def validate(model, data_generator, device):
+
+    # criterion = nn.BCEWithLogitsLoss(pos_weight=torch.tensor([23.7]).float().to(device))
+    loss_full = []
+    aucs = []
+    mrrs = []
+    ndcg5s = []
+    ndcg10s = []
+
+    for minibatch in data_generator:
+        y_pred = model(minibatch["candidate_news"], minibatch["clicked_news"])
+        y = minibatch["clicked"].float().to(device)
+        loss = criterion(y_pred, y)
+        loss_full.append(loss.item())
+        y_pred_list = y_pred.tolist()
+        y_list = y.tolist()
+
+        auc = roc_auc_score(y_list, y_pred_list)
+        mrr = mrr_score(y_list, y_pred_list)
+        ndcg5 = ndcg_score(y_list, y_pred_list, 5)
+        ndcg10 = ndcg_score(y_list, y_pred_list, 10)
+
+        aucs.append(auc)
+        mrrs.append(mrr)
+        ndcg5s.append(ndcg5)
+        ndcg10s.append(ndcg10)
+
+
+    return np.mean(aucs), np.mean(mrrs), np.mean(ndcg5s), np.mean(ndcg10s)
+
+
+
+

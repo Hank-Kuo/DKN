@@ -1,93 +1,42 @@
-import os
-import unicodedata
-import re
-import time
-import random
-from collections import defaultdict
-from tqdm import tqdm
-import numpy as np
+from torch.utils.data import Dataset
+import pandas as pd
+from ast import literal_eval
 
-import torch
-from torch.utils.data import Dataset, DataLoader
 
-class MetaQADataset(Dataset):
-    def __init__(self, data, word2ix, relations, entities, entity2idx):
-        self.data = data
-        self.relations = relations
-        self.entities = entities
-        self.word_to_ix = {}
-        self.entity2idx = entity2idx
-        self.word_to_ix = word2ix
-        self.pos_dict = defaultdict(list)
-        self.neg_dict = defaultdict(list)
-        self.index_array = list(self.entities.keys())
+class DKNDataset(Dataset):
+    def __init__(self, behaviors_path, news_path, pad_words_num, num_clicked_news_a_user):
+        super(Dataset, self).__init__()
+        self.behaviors = pd.read_table(behaviors_path)
+        self.behaviors.clicked_news.fillna('', inplace=True)
+        self.news_with_entity = pd.read_table(news_path, index_col='id', converters={ 'title': literal_eval, 'entities': literal_eval })
+        
+        self.pad_words_num = pad_words_num
+        self.num_clicked_news_a_user = num_clicked_news_a_user
 
     def __len__(self):
-        return len(self.data)
+        return len(self.behaviors)
 
-    def toOneHot(self, indices):
-        indices = torch.LongTensor(indices)
-        vec_len = len(self.entity2idx)
-        one_hot = torch.FloatTensor(vec_len)
-        one_hot.zero_()
-        one_hot.scatter_(0, indices, 1)
-        return one_hot
+    def news2dict(self, news, df):
+        return {
+            "word": df.loc[news].title,
+            "entity": df.loc[news].entities
+        } if news in df.index else {
+            "word": [0] * self.pad_words_num,
+            "entity": [0] * self.pad_words_num
+        }
 
-    def __getitem__(self, index):
-        data_point = self.data[index]
-        question_text = data_point[1]
-        question_ids = [self.word_to_ix[word] for word in question_text.split()]
-        head_id = self.entity2idx[data_point[0].strip()] 
-        tail_ids = []
-        for tail_name in data_point[2]:
-            tail_name = tail_name.strip()
-            tail_ids.append(self.entity2idx[tail_name])
-        tail_onehot = self.toOneHot(tail_ids)
-        return question_ids, head_id, tail_onehot 
+    def __getitem__(self, idx):
+        item = {}
+        row = self.behaviors.iloc[idx]
+        item["clicked"] = row.clicked
+        item["candidate_news"] = self.news2dict(row.candidate_news, self.news_with_entity)
+        item["clicked_news"] = [
+            self.news2dict(x, self.news_with_entity)
+            for x in row.clicked_news.split()[:self.num_clicked_news_a_user]
+        ]
+        padding = { "word": [0] * self.padding_word_num, "entity": [0] * self.padding_word_num }
+        repeated_times = self.num_clicked_news_a_user - len(item["clicked_news"])
+        assert repeated_times >= 0
+        item["clicked_news"].extend([padding] * repeated_times)
 
-def _collate_fn(batch):
-    sorted_seq = sorted(batch, key=lambda sample: len(sample[0]), reverse=True)
-    sorted_seq_lengths = [len(i[0]) for i in sorted_seq]
-    longest_sample = sorted_seq_lengths[0]
-    minibatch_size = len(batch)
-    input_lengths = []
-    p_head = []
-    p_tail = []
-    inputs = torch.zeros(minibatch_size, longest_sample, dtype=torch.long)
-    for x in range(minibatch_size):
-        sample = sorted_seq[x][0]
-        p_head.append(sorted_seq[x][1])
-        tail_onehot = sorted_seq[x][2]
-        """
-        p_tail.append(sorted_seq[x][2])
-        neg_tail.append(sorted_seq[x][3])
-        """
-        p_tail.append(tail_onehot)
-        seq_len = len(sample)
-        input_lengths.append(seq_len)
-        sample = torch.tensor(sample, dtype=torch.long)
-        sample = sample.view(sample.shape[0])
-        inputs[x].narrow(0,0,seq_len).copy_(sample)
-    # print(input.size())
-
-    return inputs, torch.tensor(input_lengths, dtype=torch.long), torch.tensor(p_head, dtype=torch.long), torch.stack(p_tail) # torch.tensor(p_tail, dtype=torch.long) torch.tensor(neg_tail, dtype=torch.long)
-
-class MetaQADataLoader(DataLoader):
-    def __init__(self, *args, **kwargs):
-        super(MetaQADataLoader, self).__init__(*args, **kwargs)
-        self.collate_fn = _collate_fn
-
-
-def data_generator(data, word2ix, entity2idx):
-    for i in range(len(data)):
-        data_sample = data[i]
-        head = entity2idx[data_sample[0].strip()]
-        question = data_sample[1].strip().split(' ')
-        encoded_question = [word2ix[word.strip()] for word in question]
-        if type(data_sample[2]) is str:
-            ans = entity2idx[data_sample[2]]
-        else:
-            ans = [entity2idx[entity.strip()] for entity in list(data_sample[2])]
-
-        yield torch.tensor(head, dtype=torch.long),torch.tensor(encoded_question, dtype=torch.long) , ans, torch.tensor(len(encoded_question), dtype=torch.long), data_sample[1]
-
+        return item
